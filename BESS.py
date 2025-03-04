@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import matplotlib.pyplot as plt
 import io
+from scipy.optimize import minimize
 
 # Streamlit UI
 st.title("BESS Analysis Tool")
@@ -28,41 +29,90 @@ if uploaded_file is not None:
 
     min_bess_charge = min_bess_charge_percent * MWh
     max_bess_charge = max_bess_charge_percent * MWh
-    bess_charge = min_bess_charge
 
-    # Processing Logic
+    # Slack values from the uploaded CSV
+    slack_values = df['Slack'].values
+
+    # Define the objective function for optimization
+    def objective_function(params, slack_values, efficiency, min_bess_charge, max_bess_charge):
+        peak_discharge_rate, bess_capacity = params
+        bess_charge = min_bess_charge
+        lack_of_energy = 0
+        excess_of_energy = 0
+
+        for slack in slack_values:
+            if slack > 0:
+                room_to_min = bess_charge - min_bess_charge
+                discharge_amount = min(slack / efficiency, peak_discharge_rate, room_to_min)
+                bess_charge -= discharge_amount
+                lack_of_energy += slack - (discharge_amount * efficiency)
+            elif slack < 0:
+                room_to_max = max_bess_charge - bess_charge
+                charge_amount = min(abs(slack) * efficiency, peak_discharge_rate, room_to_max)
+                bess_charge += charge_amount
+                excess_of_energy += abs(slack) - (charge_amount / efficiency)
+
+        return abs(lack_of_energy - excess_of_energy)
+
+    # Initial guesses for peak discharge rate and BESS capacity
+    initial_guess = [MW, MWh]  # MW and MWh
+
+    # Bounds for peak discharge rate and BESS capacity
+    bounds = [(0, None), (0, None)]
+
+    # Constraints
+    constraints = [
+        {'type': 'ineq', 'fun': lambda x: max_bess_charge - x[1]},  # BESS capacity <= max_bess_charge
+        {'type': 'ineq', 'fun': lambda x: x[1] - min_bess_charge}   # BESS capacity >= min_bess_charge
+    ]
+
+    # Run the optimization
+    result = minimize(
+        objective_function,
+        initial_guess,
+        args=(slack_values, efficiency, min_bess_charge, max_bess_charge),
+        bounds=bounds,
+        constraints=constraints
+    )
+
+    # Extract the optimized values
+    optimal_peak_discharge_rate, optimal_bess_capacity = result.x
+
+    # Display optimized values
+    st.write(f"Optimized Peak Discharge Rate for BESS: {optimal_peak_discharge_rate:.2f} MW")
+    st.write(f"Optimized BESS Capacity: {optimal_bess_capacity:.2f} MWh")
+
+    # Processing Logic with Optimized Values
     bess_values = []
     energy_flow_values = []
     transition_count = 0
     cycle_count = 0
     in_discharge_cycle = False
-    last_bess_charge = bess_charge
-
-    slack_values = df['Slack'].values
+    last_bess_charge = min_bess_charge
 
     for slack in slack_values:
         energy_flow = 0
 
         if slack > 0:
-            room_to_min = bess_charge - min_bess_charge
-            discharge_amount = min(slack / efficiency, MW, room_to_min)
-            bess_charge -= discharge_amount
+            room_to_min = last_bess_charge - min_bess_charge
+            discharge_amount = min(slack / efficiency, optimal_peak_discharge_rate, room_to_min)
+            last_bess_charge -= discharge_amount
             energy_flow = discharge_amount * efficiency
 
         elif slack < 0:
-            room_to_max = max_bess_charge - bess_charge
-            charge_amount = min(abs(slack) * efficiency, MW, room_to_max)
-            bess_charge += charge_amount
+            room_to_max = max_bess_charge - last_bess_charge
+            charge_amount = min(abs(slack) * efficiency, optimal_peak_discharge_rate, room_to_max)
+            last_bess_charge += charge_amount
             energy_flow = -charge_amount / efficiency
 
-        bess_values.append(bess_charge)
+        bess_values.append(last_bess_charge)
         energy_flow_values.append(energy_flow)
 
-        if bess_charge >= max_bess_charge:
+        if last_bess_charge >= max_bess_charge:
             if in_discharge_cycle:
                 cycle_count += 1
                 in_discharge_cycle = False
-        elif bess_charge <= min_bess_charge:
+        elif last_bess_charge <= min_bess_charge:
             in_discharge_cycle = True
 
     output_df = pd.DataFrame({
@@ -108,13 +158,6 @@ if uploaded_file is not None:
 
     plt.tight_layout()
     st.pyplot(fig)
-
-    # Potential BESS Size Calculation
-    peak_bess_discharge = max(average_slack[average_slack > 0])
-    required_bess_capacity = -average_slack[average_slack < 0].sum()
-
-    st.write(f"Suggested Peak Discharge Rate for BESS: {peak_bess_discharge:.2f} MW")
-    st.write(f"Suggested BESS Capacity: {required_bess_capacity:.2f} MWh")
 
     # Monthly Clustered Column Chart
     output_df['Month'] = (df.index // (hours_per_day * 30)) % 12 + 1
