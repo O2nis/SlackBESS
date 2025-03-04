@@ -4,5 +4,5 @@ matplotlib
 scikit-learn
 requests
 streamlit
-scipy.optimize
+scipy
 io
