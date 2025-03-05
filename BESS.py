@@ -1,7 +1,6 @@
 import streamlit as st
 import pandas as pd
 import matplotlib.pyplot as plt
-import io
 from scipy.optimize import minimize
 
 # Streamlit UI
@@ -85,12 +84,16 @@ if uploaded_file is not None:
     # Processing Logic with Optimized Values
     bess_values = []
     energy_flow_values = []
-    transition_count = 0
-    cycle_count = 0
+    cycles_per_month = {}  # To store the number of cycles per month
     in_discharge_cycle = False
     last_bess_charge = min_bess_charge
 
-    for slack in slack_values:
+    # Add a 'Month' column to the dataframe
+    hours_per_day = 24
+    days_per_month = 30
+    df['Month'] = (df.index // (hours_per_day * days_per_month)) + 1
+
+    for idx, slack in enumerate(slack_values):
         energy_flow = 0
 
         if slack > 0:
@@ -108,80 +111,40 @@ if uploaded_file is not None:
         bess_values.append(last_bess_charge)
         energy_flow_values.append(energy_flow)
 
+        # Check for cycles
         if last_bess_charge >= max_bess_charge:
             if in_discharge_cycle:
-                cycle_count += 1
+                # Increment cycle count for the current month
+                current_month = df.loc[idx, 'Month']
+                cycles_per_month[current_month] = cycles_per_month.get(current_month, 0) + 1
                 in_discharge_cycle = False
         elif last_bess_charge <= min_bess_charge:
             in_discharge_cycle = True
 
+    # Create a DataFrame for cycles per month
+    cycles_df = pd.DataFrame(list(cycles_per_month.items()), columns=['Month', 'Cycles'])
+
+    # Plot the bar chart for cycles per month
+    st.write("### Number of Cycles per Month")
+    fig_cycles, ax = plt.subplots(figsize=(10, 6))
+    cycles_df.plot(kind='bar', x='Month', y='Cycles', ax=ax, legend=False, color='blue')
+    ax.set_xlabel('Month')
+    ax.set_ylabel('Number of Cycles')
+    ax.set_title('Number of Cycles per Month')
+    ax.grid(True)
+    st.pyplot(fig_cycles)
+
+    # Output DataFrame
     output_df = pd.DataFrame({
         'BESS Charge': bess_values,
         'Energy Flow': energy_flow_values,
-        'Slack': slack_values
+        'Slack': slack_values,
+        'Month': df['Month']
     })
 
-    st.write(f"The BESS completed {cycle_count} full cycles.")
-
-    # Average Annual Daily Profile Calculation
-    hours_per_day = 24
-    days_per_year = 365
-
-    bess_charge_daily = output_df['BESS Charge'].values.reshape(days_per_year, hours_per_day)
-    energy_flow_daily = output_df['Energy Flow'].values.reshape(days_per_year, hours_per_day)
-    slack_daily = output_df['Slack'].values.reshape(days_per_year, hours_per_day)
-
-    average_bess_charge = bess_charge_daily.mean(axis=0)
-    average_energy_flow = energy_flow_daily.mean(axis=0)
-    average_slack = slack_daily.mean(axis=0)
-
-    # Plotting Average Annual Daily Profile
-    fig, axs = plt.subplots(3, 1, figsize=(12, 8))
-
-    axs[0].plot(average_bess_charge, label='BESS Charge (MWh)', color='blue')
-    axs[0].set_title('Average Annual Daily Profile: BESS Charge')
-    axs[0].set_xlabel('Hour of the Day')
-    axs[0].set_ylabel('BESS Charge (MWh)')
-    axs[0].grid(True)
-
-    axs[1].plot(average_energy_flow, label='Energy Flow (MW)', color='green')
-    axs[1].set_title('Average Annual Daily Profile: Energy Flow')
-    axs[1].set_xlabel('Hour of the Day')
-    axs[1].set_ylabel('Energy Flow (MW)')
-    axs[1].grid(True)
-
-    axs[2].plot(average_slack, label='Slack (MW)', color='red')
-    axs[2].set_title('Average Annual Daily Profile: Slack')
-    axs[2].set_xlabel('Hour of the Day')
-    axs[2].set_ylabel('Slack (MW)')
-    axs[2].grid(True)
-
-    plt.tight_layout()
-    st.pyplot(fig)
-
-    # Monthly Clustered Column Chart
-    output_df['Month'] = (df.index // (hours_per_day * 30)) % 12 + 1
-    monthly_stats = output_df.groupby('Month').agg({
-        'Slack': [
-            lambda x: x[x > 0].sum(),
-            lambda x: x[x < 0].sum()
-        ],
-        'Energy Flow': [
-            lambda x: x[x > 0].sum(),
-            lambda x: x[x < 0].sum()
-        ]
-    })
-    monthly_stats.columns = ['Lack of Energy', 'Excess of energy', 'Energy From BESS', 'Energy to BESS']
-
-    fig2 = plt.figure(figsize=(10, 6))
-    monthly_stats.plot(kind='bar', ax=fig2.gca(), color=['orange', 'red', 'green', 'darkgreen'])
-    plt.title('Monthly Energy Flow')
-    plt.ylabel('MWh')
-    plt.xlabel('Month')
-    plt.xticks(rotation=0)
-    plt.grid(True)
-    plt.tight_layout()
-    st.pyplot(fig2)
+    # Display the total number of cycles
+    total_cycles = cycles_df['Cycles'].sum()
+    st.write(f"The BESS completed {total_cycles} full cycles.")
 
     # Download Output CSV
     csv_buffer = io.StringIO()
